@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Notificator</string>
+    <string name="channel_name">来自 iPhone 的通知</string>
+    <string name="channel_description">转发来自 iPhone 的通知</string>
+</resources>
