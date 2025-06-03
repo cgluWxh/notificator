@@ -9,6 +9,9 @@ import android.os.Handler;
 import android.os.Message;
 import android.util.Log;
 
+import java.util.Objects;
+
+
 public class SystemReceiver extends BroadcastReceiver {
 
 
@@ -19,6 +22,7 @@ public class SystemReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
+        Log.e("TAG", "onReceive: "+intent.getAction());
             if (BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(intent.getAction())){
 
                 BluetoothDevice btDevice = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
@@ -65,7 +69,8 @@ public class SystemReceiver extends BroadcastReceiver {
                     msg.what = GlobalDefine.BLUETOOTH_OFF;
                 }
                 mhandler.sendMessage(msg);
-            }else if (intent.getAction().equals(GlobalDefine.androidResponseAction)){
+            }
+            else if (Objects.equals(intent.getAction(), GlobalDefine.androidResponseAction)){
                 Message msg = mhandler.obtainMessage();
                 msg.what = -1;
                 if(intent.getIntExtra(GlobalDefine.androidResponseActionCode,-1)==1){

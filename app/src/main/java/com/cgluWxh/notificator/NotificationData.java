@@ -1,10 +1,9 @@
 package com.cgluWxh.notificator;
 
-import org.json.JSONObject;
-
 public class NotificationData {
     public String title="";
+    public long time=-1;
     public String content="";
-    public JSONObject from=null;
+    public PersistAppData from=null;
     public int uid=-1;
 }

@@ -1,5 +1,10 @@
 <resources>
     <string name="app_name">Notificator</string>
-    <string name="channel_name">来自 iPhone 的通知</string>
-    <string name="channel_description">转发来自 iPhone 的通知</string>
+    <string name="to_be_initialized">To be initialized…</string>
+    <string name="service_created">Service Created</string>
+    <string name="connected_to">Connected to iPhone %s</string>
+    <string name="sent_from_app">Sent from %s</string>
+    <string name="system_phone">System Phone</string>
+    <string name="advertising">Waiting for iPhone…</string>
+    <string name="error">Error: %s</string>
 </resources>

@@ -21,6 +21,8 @@ import android.bluetooth.le.AdvertiseData;
 import android.bluetooth.le.AdvertiseSettings;
 import android.bluetooth.le.BluetoothLeAdvertiser;
 import android.os.Build;
+import android.os.RemoteCallbackList;
+import android.os.RemoteException;
 import android.support.v4.app.NotificationCompat;
 import android.content.Context;
 import android.content.Intent;
@@ -30,20 +32,24 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Message;
-import android.os.Messenger;
 import android.os.ParcelUuid;
 import android.util.Log;
-
-import org.json.JSONException;
-
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Objects;
 import java.util.UUID;
 
 public class ANCSService extends Service implements Handler.Callback{
-
-    private Messenger mMessenger;
-    private Handler ServerHandler;
+    public final static int STATE_NOT_INITIALIZED = -1;
+    public final static int STATE_SERVICE_CREATED = 0;
+    public final static int STATE_IPHONE_CONNECTED = 999;
+    public final static int STATE_ADVERTISING = 1;
+    public final static int STATE_ERROR = -2;
+    private Handler mServerHandler;
     private HandlerThread handlerThread;
     private SystemReceiver mBTReceiver;
 
@@ -64,9 +70,40 @@ public class ANCSService extends Service implements Handler.Callback{
     private BluetoothLeAdvertiser advertiser;
     private BluetoothGattServerCallback bluetoothGattServerCallback;
 
-    public static final String CHANNEL_ID = "notification-iphone";
+    private NotificationManager mNotificationManager;
 
-    private PersistAppDataStorage persistAppDataStorage;
+    private final UIState mCurrentValue = new UIState();
+
+    private final RemoteCallbackList<IANCSCallback> mCallbacks = new RemoteCallbackList<>();
+
+    private final ArrayList<NotificationData> mCachedNotifications = new ArrayList<>();
+
+    private final IANCSInterface.Stub mBinder = new IANCSInterface.Stub() {
+        @Override
+        public UIState getCurrentState() {
+            return mCurrentValue;
+        }
+
+        @Override
+        public void registerCallback(IANCSCallback callback) {
+            mCallbacks.register(callback);
+        }
+
+        @Override
+        public void unregisterCallback(IANCSCallback callback) {
+            mCallbacks.unregister(callback);
+        }
+    };
+
+    private void updateUIState(UIState newValue) {
+        int count = mCallbacks.beginBroadcast();
+        for (int i = 0; i < count; i++) {
+            try {
+                mCallbacks.getBroadcastItem(i).onValueChanged(newValue);
+            } catch (RemoteException ignored) {}
+        }
+        mCallbacks.finishBroadcast();
+    }
 
     public static String Bytes2HexString(byte[] b, int offset, int count) {
         if (offset > b.length) {
@@ -89,7 +126,7 @@ public class ANCSService extends Service implements Handler.Callback{
     @Override
     public void onCreate() {
         super.onCreate();
-        handlerThread = new HandlerThread("ServerHandlerThread");
+        handlerThread = new HandlerThread("mServerHandlerThread");
         handlerThread.start();
 
         mBluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
@@ -102,27 +139,25 @@ public class ANCSService extends Service implements Handler.Callback{
             mBluetoothAdapter.enable();
         }
 
-        ServerHandler = new Handler(handlerThread.getLooper(),this);
-        mMessenger = new Messenger(ServerHandler);
-        Log.e(GlobalDefine.LOG_TAG, "onCreate");
+        mServerHandler = new Handler(handlerThread.getLooper(),this);
+        mCurrentValue.state = STATE_SERVICE_CREATED;
+        updateUIState(mCurrentValue);
 
-        mBTReceiver = new SystemReceiver(ServerHandler);
+        mBTReceiver = new SystemReceiver(mServerHandler);
         IntentFilter intentFilter = new IntentFilter(BluetoothDevice.ACTION_ACL_CONNECTED);
         intentFilter.addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
         intentFilter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
         intentFilter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
-        registerReceiver(mBTReceiver,intentFilter);
+        registerReceiver(mBTReceiver, intentFilter);
+
+        mNotificationManager = getSystemService(NotificationManager.class);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            CharSequence name = getString(R.string.channel_name);
-            String description = getString(R.string.channel_description);
             int importance = NotificationManager.IMPORTANCE_DEFAULT;
-            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, name, importance);
-            channel.setDescription(description);
-            NotificationManager notificationManager = getSystemService(NotificationManager.class);
-            notificationManager.createNotificationChannel(channel);
+            NotificationChannel channel = new NotificationChannel("default", "Default", importance);
+            channel.setDescription("Actually useless");
+            mNotificationManager.createNotificationChannel(channel);
         }
-        persistAppDataStorage = new PersistAppDataStorage(getApplicationContext());
     }
 
     @Override
@@ -130,18 +165,19 @@ public class ANCSService extends Service implements Handler.Callback{
         handlerThread.getLooper().quit();
         handlerThread = null;
         //蓝牙线程终止
-        ServerHandler = null;
-        mMessenger = null;
+        mServerHandler = null;
         unregisterReceiver(mBTReceiver);
+        mCurrentValue.state = STATE_NOT_INITIALIZED;
+        updateUIState(mCurrentValue);
+        mCallbacks.kill();
         super.onDestroy();
-        Log.e(GlobalDefine.LOG_TAG, "onDestroy");
     }
 
 
 
     @Override
     public IBinder onBind(Intent intent) {
-        return mMessenger.getBinder();
+        return mBinder;
     }
 
     @Override
@@ -166,35 +202,80 @@ public class ANCSService extends Service implements Handler.Callback{
             case GlobalDefine.BLUETOOTH_DISPLAY_INFO:
                 // 发出一个通知
                 TagScanner tagScanner = new TagScanner((byte[]) message.obj);
-                NotificationData notificationData = new NotificationData();
+                if (tagScanner.mType == TagScanner.TAG_TYPE_NOTIFICATION_ATTRIBUTE) {
+                    NotificationData notificationData = new NotificationData();
+                    notificationData.uid = tagScanner.getNotificationUID();
 
-                notificationData.uid = tagScanner.getNotificationUID();
+                    Log.i(GlobalDefine.LOG_TAG, "NotificationUID =" + notificationData.uid);
 
-                Log.i(GlobalDefine.LOG_TAG, "NotificationUID =" + notificationData.uid);
-
-                BleTag bleTag = tagScanner.nextTag();
-                while (bleTag != null) {
-                    switch (bleTag.type) {
-                        case TagScanner.TAG_ATTR_TITLE:
-                            notificationData.title = bleTag.value;
-                            Log.i(GlobalDefine.LOG_TAG, "通知标题："+bleTag.value);
-                            break;
-                        case TagScanner.TAG_ATTR_CONTENT:
-                            notificationData.content = bleTag.value;
-                            Log.i(GlobalDefine.LOG_TAG, "通知内容："+bleTag.value);
-                            break;
-                        case TagScanner.TAG_ATTR_BUNDLEID:
-                            notificationData.from = persistAppDataStorage.getData(bleTag.value);
-                            Log.i(GlobalDefine.LOG_TAG, "通知来源："+bleTag.value);
-                            break;
+                    BleTag bleTag = tagScanner.nextTag();
+                    while (bleTag != null) {
+                        switch (bleTag.type) {
+                            case TagScanner.TAG_ATTR_BUNDLEID:
+                                if (bleTag.value == null) {
+                                    notificationData.from = new PersistAppData("Phone", getString(R.string.system_phone));
+                                    break;
+                                }
+                                Log.i(GlobalDefine.LOG_TAG, "通知来源："+bleTag.value);
+                                notificationData.from = new PersistAppData(bleTag.value);
+                                break;
+                            case TagScanner.TAG_ATTR_TITLE:
+                                notificationData.title = bleTag.value;
+                                Log.i(GlobalDefine.LOG_TAG, "通知标题："+bleTag.value);
+                                break;
+                            case TagScanner.TAG_ATTR_CONTENT:
+                                notificationData.content = bleTag.value;
+                                Log.i(GlobalDefine.LOG_TAG, "通知内容："+bleTag.value);
+                                break;
+                            case TagScanner.TAG_ATTR_DATE:
+                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                                    DateTimeFormatter formatter = null;
+                                    formatter = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss");
+                                    LocalDateTime localDateTime = LocalDateTime.parse(bleTag.value, formatter);
+                                    notificationData.time = localDateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+                                }
+                                Log.i(GlobalDefine.LOG_TAG, "通知时间："+bleTag.value);
+                                break;
+                        }
+                        bleTag = tagScanner.nextTag();
                     }
-                    bleTag = tagScanner.nextTag();
+                    if (notificationData.from.name == null) {
+                        mCachedNotifications.add(notificationData);
+                        Message msg = mServerHandler.obtainMessage();
+                        msg.what = GlobalDefine.BLUETOOTH_GET_APPINFO;
+                        msg.obj = notificationData;
+                        mServerHandler.sendMessage(msg);
+                    } else {
+                        showNotification(notificationData);
+                    }
+                } else if (tagScanner.mType == TagScanner.TAG_TYPE_APP_ATTRIBUTE) {
+                    String bundleID = tagScanner.mAppBundleID;
+                    String bundleName = null;
+                    BleTag bleTag = tagScanner.nextTag();
+                    while (bleTag != null) {
+                        if (bleTag.type == TagScanner.TAG_ATTR_APPNAME) {
+                            bundleName = bleTag.value;
+                            Log.i(GlobalDefine.LOG_TAG, "应用名：" + bleTag.value);
+                        }
+                        bleTag = tagScanner.nextTag();
+                    }
+                    for (NotificationData e : mCachedNotifications) {
+                        if (Objects.equals(e.from.bundleID, bundleID)) {
+                            e.from.name = bundleName;
+                            showNotification(e);
+                            mCachedNotifications.remove(e);
+                        }
+                    }
                 }
-//                showNotification(this, notificationUID, title.toString(), msg);
+
                 break;
             case GlobalDefine.BLUETOOTH_GET_MORE_INFO:
                 byte[] data2 = (byte[]) message.obj;
-                retrieveMoreInfo(data2);
+                getNotificationMoreInfo(data2);
+                break;
+            case GlobalDefine.BLUETOOTH_GET_APPINFO:
+                NotificationData nData = (NotificationData) message.obj;
+                getAppMoreInfo(nData.from.bundleID);
                 break;
             default:
                 break;
@@ -206,14 +287,13 @@ public class ANCSService extends Service implements Handler.Callback{
     @SuppressWarnings("unchecked")
     public boolean createBond(@SuppressWarnings("rawtypes") Class btClass, BluetoothDevice btDevice)
     {
-        Method createBondMethod = null;
+        Method createBondMethod;
         Boolean returnValue = null;
         try {
             createBondMethod = btClass.getMethod("createBond");
             returnValue = (Boolean) createBondMethod.invoke(btDevice);
-        } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
-            e.printStackTrace();
-        }
+        } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException ignored) {}
+
         return Boolean.TRUE.equals(returnValue);
     }
 
@@ -268,23 +348,30 @@ public class ANCSService extends Service implements Handler.Callback{
 
             @Override
             public void onStartSuccess(AdvertiseSettings settingsInEffect) {
+                mCurrentValue.state = STATE_ADVERTISING;
+                mCurrentValue.extraInfo = "";
+                updateUIState(mCurrentValue);
                 Log.e(GlobalDefine.LOG_TAG, "#BLE advertisement successfully");
             }
 
             @Override
             public void onStartFailure(int errorCode) {
-                Log.e(GlobalDefine.LOG_TAG, "Failed to add BLE advertisement, reason: " + errorCode);
+                mCurrentValue.state = STATE_ERROR;
+                mCurrentValue.extraInfo = "Failed to add BLE advertisement, reason: " + errorCode;
+                Log.e(GlobalDefine.LOG_TAG, mCurrentValue.extraInfo);
                 if(errorCode == ADVERTISE_FAILED_DATA_TOO_LARGE){
-                    Log.e(GlobalDefine.LOG_TAG,"Failed to start advertising as the advertise data to be broadcasted is larger than 31 bytes.");
+                    mCurrentValue.extraInfo = "Failed to start advertising as the advertise data to be broadcast is larger than 31 bytes.";
                 }else if(errorCode == ADVERTISE_FAILED_TOO_MANY_ADVERTISERS){
-                    Log.e(GlobalDefine.LOG_TAG,"Failed to start advertising because TOO_MANY_ADVERTISERS.");
+                    mCurrentValue.extraInfo = "Failed to start advertising because TOO_MANY_ADVERTISERS.";
                 }else if(errorCode == ADVERTISE_FAILED_ALREADY_STARTED){
-                    Log.e(GlobalDefine.LOG_TAG,"Failed to start advertising as the advertising is already started");
+                    mCurrentValue.extraInfo = "Failed to start advertising as the advertising is already started";
                 }else if(errorCode == ADVERTISE_FAILED_INTERNAL_ERROR){
-                    Log.e(GlobalDefine.LOG_TAG,"Operation failed due to an internal error");
+                    mCurrentValue.extraInfo = "Operation failed due to an internal error";
                 }else if(errorCode == ADVERTISE_FAILED_FEATURE_UNSUPPORTED){
-                    Log.e(GlobalDefine.LOG_TAG,"This feature is not supported on this platform");
+                    mCurrentValue.extraInfo = "This feature is not supported on this platform";
                 }
+                Log.e(GlobalDefine.LOG_TAG, mCurrentValue.extraInfo);
+                updateUIState(mCurrentValue);
             }
         };
 
@@ -297,7 +384,6 @@ public class ANCSService extends Service implements Handler.Callback{
 
 
     public void negativeResponseToNotification(byte[] nid) {
-
         byte[] action = {
                 (byte) 0x02,
                 //UID
@@ -356,25 +442,28 @@ public class ANCSService extends Service implements Handler.Callback{
         }
     }
 
-    public void retrieveMoreInfo(byte[] nid) {
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        // 执行你的后台任务
+        return START_STICKY;  // 确保服务被杀死后重启
+    }
 
+    public void getNotificationMoreInfo(byte[] nid) {
         byte[] getNotificationAttribute = {
                 (byte) 0x00,
                 //UID
                 nid[0], nid[1], nid[2], nid[3],
-
-                //title
-                (byte) 0x01, (byte) 0xff, (byte) 0xff,
-                //subtitle
-//                (byte) 0x02, (byte) 0xff, (byte) 0xff,
-                //message
-                (byte) 0x03, (byte) 0xff, (byte) 0xff,
-                // app identifier
-                (byte) 0x00
+                (byte) TagScanner.TAG_ATTR_TITLE, (byte) 0xff, (byte) 0xff,
+                (byte) TagScanner.TAG_ATTR_CONTENT, (byte) 0xff, (byte) 0xff,
+                (byte) TagScanner.TAG_ATTR_BUNDLEID,
+                (byte) TagScanner.TAG_ATTR_DATE,
         };
 
-        Log.i(GlobalDefine.LOG_TAG,"发送获取详细信息的指令="+Bytes2HexString(getNotificationAttribute,0,getNotificationAttribute.length));
-        //如果已经绑定，而且此时未断开
+        Log.i(GlobalDefine.LOG_TAG,"发送获取通知详细信息的指令="+Bytes2HexString(getNotificationAttribute,0,getNotificationAttribute.length));
+        writeBleCommand(getNotificationAttribute);
+    }
+
+    public void writeBleCommand(byte[] command) {
         if (mConnectedGatt != null) {
             BluetoothGattService service = mConnectedGatt.getService(UUID.fromString(GlobalDefine.service_ancs));
             if (service == null) {
@@ -386,11 +475,23 @@ public class ANCSService extends Service implements Handler.Callback{
                     Log.d(GlobalDefine.LOG_TAG, "cant find chara");
                 } else {
                     Log.d(GlobalDefine.LOG_TAG, "find chara");
-                    characteristic.setValue(getNotificationAttribute);
+                    characteristic.setValue(command);
                     mConnectedGatt.writeCharacteristic(characteristic);
                 }
             }
         }
+    }
+
+
+    public void getAppMoreInfo(String bundleID) {
+        byte[] bundleIDBytes = bundleID.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] getAppInfoAttribute = new byte[3 + bundleIDBytes.length];
+        getAppInfoAttribute[0] = (byte) 0x01;
+        System.arraycopy(bundleIDBytes, 0, getAppInfoAttribute, 1, bundleIDBytes.length);
+        getAppInfoAttribute[1 + bundleIDBytes.length] = (byte) 0x00; // Terminate
+        getAppInfoAttribute[2 + bundleIDBytes.length] = (byte) 0x00; // Mean get app name
+        Log.i(GlobalDefine.LOG_TAG,"发送获取应用信息的指令="+Bytes2HexString(getAppInfoAttribute,0,getAppInfoAttribute.length));
+        writeBleCommand(getAppInfoAttribute);
     }
 
     private void setNotificationEnabled(BluetoothGattCharacteristic characteristic) {
@@ -472,31 +573,29 @@ public class ANCSService extends Service implements Handler.Callback{
 
                 /*
                 EventID：消息类型，添加(0)、修改(1)、删除(2)；
-
                 EventFlags：消息优先级，静默(1)、重要(2)；
-
                 CategoryID：消息类型；
-
                 CategoryCount：消息计数；
-
                 NotificationUID：通知ID，可以通过此ID获取详情；
                 */
-                //TODO getMoreAboutNotification(nsData);
                 Log.i(GlobalDefine.LOG_TAG,"EventID ="+nsData[0]);
                 Log.i(GlobalDefine.LOG_TAG,"EventFlags ="+nsData[1]);
                 Log.i(GlobalDefine.LOG_TAG,"CategoryID ="+nsData[2]);
                 Log.i(GlobalDefine.LOG_TAG,"CategoryCount ="+nsData[3]);
                 Log.i(GlobalDefine.LOG_TAG,"NotificationUID ="+ Bytes2HexString(nsData,4,4));
 
+                byte[] uID = new byte[4];
+                System.arraycopy(nsData,4,uID,0 ,4);
+
                 if (nsData[0]==0x02){
                     Log.i(GlobalDefine.LOG_TAG,"通知被iphone删除");
+                    int id = TagScanner.parseNotificationIDFromBytes(uID);
+                    mNotificationManager.cancel(id);
                 }else{
-                    byte[] NotificationUID = new byte[4];
-                    System.arraycopy(nsData,4,NotificationUID,0 ,4);
-                    Message msg = ServerHandler.obtainMessage();
+                    Message msg = mServerHandler.obtainMessage();
                     msg.what = GlobalDefine.BLUETOOTH_GET_MORE_INFO;
-                    msg.obj = NotificationUID;
-                    ServerHandler.sendMessage(msg);
+                    msg.obj = uID;
+                    mServerHandler.sendMessage(msg);
                 }
             }
             if (GlobalDefine.characteristics_data_source.equals(characteristic.getUuid().toString())) {
@@ -504,11 +603,10 @@ public class ANCSService extends Service implements Handler.Callback{
                 byte[] get_data = characteristic.getValue();
                 Log.i(GlobalDefine.LOG_TAG,"详细数据："+Bytes2HexString(get_data,0,get_data.length));
 
-                //TODO 显示通知消息
-                Message msg = ServerHandler.obtainMessage();
+                Message msg = mServerHandler.obtainMessage();
                 msg.what = GlobalDefine.BLUETOOTH_DISPLAY_INFO;
                 msg.obj = get_data;
-                ServerHandler.sendMessage(msg);
+                mServerHandler.sendMessage(msg);
             }
 
             if (GlobalDefine.characteristics_control_point.equals(characteristic.getUuid().toString())) {
@@ -529,6 +627,9 @@ public class ANCSService extends Service implements Handler.Callback{
                 closeGattServer();
                 String MacAddress = mIphoneDevice.getAddress();
                 Log.i(GlobalDefine.LOG_TAG,"连接到的 iPhone 的 MAC 地址："+ MacAddress);
+                mCurrentValue.state = STATE_IPHONE_CONNECTED;
+                mCurrentValue.extraInfo = MacAddress;
+                updateUIState(mCurrentValue);
                 if (mIphoneDevice.getBondState()==BluetoothDevice.BOND_BONDED){
                     mIphoneDevice.connectGatt(getApplicationContext(), false, mGattCallback);
                 }else{
@@ -539,21 +640,30 @@ public class ANCSService extends Service implements Handler.Callback{
     }
 
 
-    public static void showNotification(Context context,int id,String title,String message) {
-        Notification notification = new NotificationCompat.Builder(context, CHANNEL_ID)
-                .setLargeIcon(BitmapFactory.decodeResource(context.getResources(), R.mipmap.ic_launcher))
+    public void showNotification(NotificationData nData) {
+        Log.e(GlobalDefine.LOG_TAG, "showNotification: "+nData.title+nData.content+nData.time+nData.from.bundleID);
+        String CHANNEL_ID = nData.from.bundleID;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            int importance = NotificationManager.IMPORTANCE_DEFAULT;
+            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, nData.from.name, importance);
+            channel.setDescription(nData.from.name);
+            mNotificationManager.createNotificationChannel(channel);
+        }
+        long time = System.currentTimeMillis();
+        if (nData.time > 0) time = nData.time;
+        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setLargeIcon(BitmapFactory.decodeResource(getResources(), R.drawable.ic_launcher_foreground))
                 .setSmallIcon(R.mipmap.ic_launcher)
 //                .setTicker("通知来了")
-                .setContentTitle(title)
-                .setContentText(message)
-                .setWhen(System.currentTimeMillis())
+                .setContentTitle(nData.from.name + " - " + nData.title)
+                .setContentText(nData.content)
+                .setWhen(time)
                 .setPriority(Notification.PRIORITY_DEFAULT)
                 .setAutoCancel(true)
                 .setOngoing(false)
                 .setDefaults(Notification.DEFAULT_VIBRATE | Notification.DEFAULT_SOUND)
-                .setContentIntent(PendingIntent.getActivity(context, 1, new Intent(context, MainActivity.class), PendingIntent.FLAG_CANCEL_CURRENT))
+                .setContentIntent(PendingIntent.getActivity(this, 1, new Intent(this, MainActivity.class), PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE))
                 .build();
-        NotificationManager notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-        notificationManager.notify(id, notification);
+        mNotificationManager.notify(nData.uid, notification);
     }
 }

@@ -20,6 +20,8 @@ public class GlobalDefine {
     static public final int BLUETOOTH_GET_MORE_INFO =  1008;
     static public final int BLUETOOTH_DISPLAY_INFO  =  1009;
 
+    static public final int BLUETOOTH_GET_APPINFO = 1010;
+
     public static final String service_hid = "00001812-0000-1000-8000-00805f9b34fb";
     public static final String service_ancs = "7905f431-b5ce-4e99-a40f-4b1e122d00d0";
     public static final String characteristics_notification_source = "9fbf120d-6301-42d9-8c58-25e699a21dbd";

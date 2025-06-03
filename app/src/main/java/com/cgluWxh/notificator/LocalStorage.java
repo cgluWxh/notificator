@@ -8,7 +8,7 @@ public class LocalStorage {
         mSharedPreferences = sharedPreferences;
     }
     public String getValue(String key) {
-        return getValue(key, "");
+        return getValue(key, null);
     }
 
     public String getValue(String key, String defaultVal) {
