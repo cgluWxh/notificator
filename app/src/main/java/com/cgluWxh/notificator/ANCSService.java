@@ -1,5 +1,6 @@
 package com.cgluWxh.notificator;
 
+import android.app.ActivityManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -40,6 +41,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -77,6 +79,7 @@ public class ANCSService extends Service implements Handler.Callback{
     private final RemoteCallbackList<IANCSCallback> mCallbacks = new RemoteCallbackList<>();
 
     private final ArrayList<NotificationData> mCachedNotifications = new ArrayList<>();
+
 
     private final IANCSInterface.Stub mBinder = new IANCSInterface.Stub() {
         @Override
@@ -192,7 +195,11 @@ public class ANCSService extends Service implements Handler.Callback{
             case GlobalDefine.BLUETOOTH_ON:
                 initGATTServer();
                 break;
-
+            case GlobalDefine.BLUETOOTH_OFF:
+                mCurrentValue.state = STATE_ERROR;
+                mCurrentValue.extraInfo = "Bluetooth OFF";
+                updateUIState(mCurrentValue);
+                break;
             case GlobalDefine.BLUETOOTH_ACCEPT:
                 positiveResponseToNotification((byte[]) message.obj);
                 break;
@@ -267,7 +274,6 @@ public class ANCSService extends Service implements Handler.Callback{
                         }
                     }
                 }
-
                 break;
             case GlobalDefine.BLUETOOTH_GET_MORE_INFO:
                 byte[] data2 = (byte[]) message.obj;
@@ -327,16 +333,22 @@ public class ANCSService extends Service implements Handler.Callback{
     }
 
     public void initGATTServer() {
-
         //先初始化好服务
         if(!initServices(getApplicationContext())){
             return;
         }
 
+//        if (!foreground) {
+//            mCurrentValue.state = STATE_ERROR;
+//            mCurrentValue.extraInfo = "Disconnected! Please restart APP.";
+//            updateUIState(mCurrentValue);
+//            return;
+//        }
+
         AdvertiseSettings settings = new AdvertiseSettings.Builder()
                 .setConnectable(true)
-                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
                 .build();
 
         AdvertiseData advertiseData = new AdvertiseData.Builder()

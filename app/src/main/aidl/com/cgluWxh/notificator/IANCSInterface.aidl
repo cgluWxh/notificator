@@ -11,6 +11,7 @@ interface IANCSInterface {
      * and return values in AIDL.
      */
     UIState getCurrentState();
+//    void setForeground(boolean f);
     void registerCallback(IANCSCallback callback);
     void unregisterCallback(IANCSCallback callback);
 }

@@ -28,7 +28,6 @@ public class SystemReceiver extends BroadcastReceiver {
                 BluetoothDevice btDevice = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
 
                 if (btDevice.getBondState()==BluetoothDevice.BOND_BONDED){
-
                     Log.e(GlobalDefine.LOG_TAG,"已经绑定 state="+btDevice.getBondState());
                     Message msg = mhandler.obtainMessage();
                     msg.what = GlobalDefine.BLUETOOTH_BONDED;

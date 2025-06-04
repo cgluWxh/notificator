@@ -22,6 +22,23 @@ public class MainActivity extends Activity{
     private IANCSInterface mService;
     private boolean mBound = false;
 
+//    @Override
+//    protected void onPause() {
+//        super.onPause();
+//        try {
+//            if (mService != null) mService.setForeground(false);
+//        } catch (RemoteException ignored) {
+//        }
+//    }
+//
+//    @Override
+//    protected void onResume() {
+//        super.onResume();
+//        try {
+//            if (mService != null) mService.setForeground(true);
+//        } catch (RemoteException ignored) {
+//        }
+//    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
