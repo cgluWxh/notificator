@@ -41,6 +41,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -266,11 +267,13 @@ public class ANCSService extends Service implements Handler.Callback{
                         }
                         bleTag = tagScanner.nextTag();
                     }
-                    for (NotificationData e : mCachedNotifications) {
+                    Iterator<NotificationData> iterator = mCachedNotifications.iterator();
+                    while (iterator.hasNext()) {
+                        NotificationData e = iterator.next();
                         if (Objects.equals(e.from.bundleID, bundleID)) {
                             e.from.name = bundleName;
                             showNotification(e);
-                            mCachedNotifications.remove(e);
+                            iterator.remove();  // 使用迭代器的 remove 方法
                         }
                     }
                 }
